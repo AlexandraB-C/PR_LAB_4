@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-Integration test for the distributed key-value store.
-
-This test verifies that:
-1. The leader accepts writes and replicates to followers
-2. Reads work on all nodes (leader and followers)
-3. Data is eventually consistent across all replicas
-4. Write quorum is respected
-5. Leader rejects writes when quorum is not met (by configuring high quorum)
+integration test for distributed key-value store
+verifies basic functionality and data consistency
 """
 
 import requests

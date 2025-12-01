@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-Performance analysis script for the distributed key-value store.
-
-This script performs the following analysis:
-1. Makes ~100 concurrent writes (10 at a time) on 10 keys
-2. Tests write quorums from 1 to 5
-3. Plots quorum vs average write latency
-4. Verifies data consistency across all replicas after writes complete
-5. Explains observed results
+performance analysis for distributed key-value store
+tests quorums from 1 to 5, generates latency plots
 """
 
 import asyncio

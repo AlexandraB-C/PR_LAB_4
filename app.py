@@ -1,17 +1,4 @@
-"""
-Distributed Key-Value Store with Single-Leader Replication
-
-This application implements a key-value store with leader-based replication.
-Only the leader accepts writes and replicates them to followers using
-semi-synchronous replication with configurable write quorum.
-
-Environment Variables:
-- NODE_TYPE: 'leader' or 'follower'
-- LEADER_URL: URL of the leader (for followers)
-- WRITE_QUORUM: Number of confirmations needed (1-5) (leader only)
-- MIN_DELAY: Min delay in ms for replication (leader only)
-- MAX_DELAY: Max delay in ms for replication (leader only)
-"""
+"""distributed key-value store with single-leader replication"""
 
 import asyncio
 import json
