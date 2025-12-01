@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  leader:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_TYPE=leader
+      - WRITE_QUORUM=3
+      - MIN_DELAY=0
+      - MAX_DELAY=1000
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  follower1:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      - NODE_TYPE=follower
+      - LEADER_URL=http://leader:8000
+    networks:
+      - kvstore-network
+    depends_on:
+      leader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  follower2:
+    build: .
+    ports:
+      - "8002:8000"
+    environment:
+      - NODE_TYPE=follower
+      - LEADER_URL=http://leader:8000
+    networks:
+      - kvstore-network
+    depends_on:
+      leader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  follower3:
+    build: .
+    ports:
+      - "8003:8000"
+    environment:
+      - NODE_TYPE=follower
+      - LEADER_URL=http://leader:8000
+    networks:
+      - kvstore-network
+    depends_on:
+      leader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  follower4:
+    build: .
+    ports:
+      - "8004:8000"
+    environment:
+      - NODE_TYPE=follower
+      - LEADER_URL=http://leader:8000
+    networks:
+      - kvstore-network
+    depends_on:
+      leader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  follower5:
+    build: .
+    ports:
+      - "8005:8000"
+    environment:
+      - NODE_TYPE=follower
+      - LEADER_URL=http://leader:8000
+    networks:
+      - kvstore-network
+    depends_on:
+      leader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  kvstore-network:
+    driver: bridge
