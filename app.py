@@ -1,272 +1,203 @@
-"""distributed key-value store with single-leader replication"""
+"""Custom Key-Value Store with Leader Replication"""
 
 import asyncio
-import json
 import logging
 import os
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional
 
-import requests
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# Configure logging
+# Environment Configuration
+NODE_ROLE = os.getenv("ROLE", "follower")  # 'leader' or 'follower'
+PORT = int(os.getenv("PORT", 8080))
+QUORUM_SIZE = int(os.getenv("WRITE_QUORUM", 3))
+MIN_DELAY = float(os.getenv("MIN_DELAY_MS", 50))
+MAX_DELAY = float(os.getenv("MAX_DELAY_MS", 1000))
+
+# Followers list from env
+FOLLOWERS: List[str] = [
+    url.strip() for url in os.getenv("FOLLOWER_URLS", "").split(",") if url.strip()
+]
+
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("kv_app")
 
-# Pydantic models for API requests/responses
+# In-memory store - simplified
+parameters: Dict[str, Dict[str, any]] = {}
+global_version = 0
+store_lock = threading.Lock()
+replication_executor = ThreadPoolExecutor(max_workers=10)  # Reduced from 20
+http_client = httpx.Client(timeout=10)
+
+# Pydantic Models
 class WriteRequest(BaseModel):
-    key: str
     value: str
-
-class WriteResponse(BaseModel):
-    success: bool
-    message: str
-    quorum_reached: Optional[int] = None
-
-class ReadResponse(BaseModel):
-    key: str
-    value: Optional[str]
-    found: bool
 
 class ReplicationRequest(BaseModel):
     key: str
-    value: str
-    operation_id: str
-
-class ReplicationResponse(BaseModel):
-    success: bool
-    operation_id: str
-
-# Environment variables with defaults
-NODE_TYPE = os.getenv('NODE_TYPE', 'follower')
-LEADER_URL = os.getenv('LEADER_URL', 'http://leader:8000')
-WRITE_QUORUM = int(os.getenv('WRITE_QUORUM', '3'))
-MIN_DELAY = int(os.getenv('MIN_DELAY', '0'))
-MAX_DELAY = int(os.getenv('MAX_DELAY', '1000'))
-
-class KeyValueStore:
-    """Simple in-memory key-value store"""
-
-    def __init__(self):
-        self.store: Dict[str, str] = {}
-        self.lock = threading.Lock()
-
-    def get(self, key: str) -> Optional[str]:
-        with self.lock:
-            return self.store.get(key)
-
-    def put(self, key: str, value: str) -> None:
-        with self.lock:
-            self.store[key] = value
-
-    def replicate_data(self, key: str, value: str) -> None:
-        """Apply replicated data to store"""
-        self.put(key, value)
-
-class ReplicationManager:
-    """Handles replication from leader to followers"""
-
-    def __init__(self, store: KeyValueStore):
-        self.store = store
-        self.follower_urls = [
-            'http://follower1:8000',
-            'http://follower2:8000',
-            'http://follower3:8000',
-            'http://follower4:8000',
-            'http://follower5:8000'
-        ]
-
-    async def replicate_write(self, key: str, value: str, operation_id: str) -> int:
-        """Replicate a write to all followers concurrently, return number of confirmations"""
-        logger.info(f"Replicating write for key '{key}' with operation_id {operation_id}")
-
-        async def replicate_to_follower(follower_url: str) -> bool:
-            """Replicate to a single follower with random delay"""
-            # Add random delay to simulate network lag
-            if MIN_DELAY > 0 or MAX_DELAY > 0:
-                delay_ms = random.randint(MIN_DELAY, MAX_DELAY)
-                await asyncio.sleep(delay_ms / 1000.0)
-                logger.debug(f"Delay of {delay_ms}ms applied before replicating to {follower_url}")
-
-            try:
-                replication_req = ReplicationRequest(
-                    key=key,
-                    value=value,
-                    operation_id=operation_id
-                )
-
-                response = requests.post(
-                    f"{follower_url}/replicate",
-                    json=replication_req.dict(),
-                    timeout=5.0
-                )
-
-                if response.status_code == 200:
-                    resp_data = response.json()
-                    if resp_data.get('success'):
-                        logger.debug(f"Replication to {follower_url} successful")
-                        return True
-
-                logger.error(f"Replication to {follower_url} failed: {response.status_code}")
-                return False
-
-            except Exception as e:
-                logger.error(f"Exception replicating to {follower_url}: {str(e)}")
-                return False
-
-        # Create tasks for concurrent replication to all followers
-        tasks = [replicate_to_follower(url) for url in self.follower_urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Count successful replications
-        successful_replications = sum(1 for result in results if result is True)
-        logger.info(f"Replication complete: {successful_replications}/{len(self.follower_urls)} followers confirmed")
-
-        return successful_replications
-
-class LeaderNode:
-    """Represents the leader node that accepts writes and replicates"""
-
-    def __init__(self, store: KeyValueStore):
-        self.store = store
-        self.replication_manager = ReplicationManager(store)
-        self.operation_counter = 0
-
-    def get_operation_id(self) -> str:
-        """Generate unique operation ID"""
-        with threading.Lock():
-            self.operation_counter += 1
-            return f"op_{self.operation_counter}"
-
-    async def write(self, key: str, value: str) -> WriteResponse:
-        """Handle a write operation with replication"""
-        logger.info(f"Leader processing write: key='{key}', value='{value[:50]}...'")
-
-        # Generate operation ID
-        operation_id = self.get_operation_id()
-
-        # Write to local store
-        self.store.put(key, value)
-
-        # Replicate to followers concurrently
-        confirmations = await self.replication_manager.replicate_write(key, value, operation_id)
-
-        # Check if quorum is reached (leader + quorum_offset followers)
-        quorum_offset = WRITE_QUORUM - 1  # Leader counts as 1
-        quorum_reached = confirmations >= quorum_offset
-
-        if quorum_reached:
-            logger.info(f"Write quorum reached: {confirmations}/{quorum_offset} followers confirmed")
-            return WriteResponse(
-                success=True,
-                message="Write successful",
-                quorum_reached=confirmations
-            )
-        else:
-            logger.warning(f"Write quorum not reached: {confirmations}/{quorum_offset} followers confirmed")
-            return WriteResponse(
-                success=False,
-                message=f"Write failed: quorum not reached ({confirmations}/{quorum_offset})",
-                quorum_reached=confirmations
-            )
-
-class FollowerNode:
-    """Represents a follower node that is read-only"""
-
-    def __init__(self, store: KeyValueStore):
-        self.store = store
-
-    async def read(self, key: str) -> ReadResponse:
-        """Handle read operation"""
-        value = self.store.get(key)
-        return ReadResponse(
-            key=key,
-            value=value,
-            found=value is not None
-        )
-
-    async def replicate(self, key: str, value: str, operation_id: str) -> ReplicationResponse:
-        """Apply replicated data from leader"""
-        logger.info(f"Follower applying replication: key='{key}' for operation {operation_id}")
-        self.store.replicate_data(key, value)
-        return ReplicationResponse(success=True, operation_id=operation_id)
-
-# Global instances
-store = KeyValueStore()
-
-if NODE_TYPE == 'leader':
-    node = LeaderNode(store)
-else:
-    node = FollowerNode(store)
+    value: Optional[str] = None
+    version: int
+    delete: bool = False
 
 # FastAPI app
-app = FastAPI(title="Distributed Key-Value Store", version="1.0.0")
+app = FastAPI(title="Custom KV Store", description="Leader-based replication KV store")
 
-@app.get("/read/{key}")
-async def read(key: str):
-    """Read a value by key (available on all nodes)"""
-    if NODE_TYPE == 'leader':
-        # For leader, we need to delegate to FollowerNode for reading
-        follower = FollowerNode(store)
-        return await follower.read(key)
-    else:
-        return await node.read(key)
+def replicate_to_follower(follower_url: str, k: str, v: Optional[str], ver: int, is_del: bool) -> bool:
+    """Send replication to one follower with random delay"""
+    # Simulate network delay
+    delay_ms = random.uniform(MIN_DELAY, MAX_DELAY)
+    time.sleep(delay_ms / 1000.0)
 
-@app.post("/write")
-async def write(request: WriteRequest):
-    """Write a key-value pair (only available on leader)"""
-    if NODE_TYPE != 'leader':
-        raise HTTPException(status_code=403, detail="Writes only allowed on leader")
-
+    payload = {"key": k, "value": v, "version": ver, "delete": is_del}
     try:
-        response = await node.write(request.key, request.value)
-        if not response.success:
-            raise HTTPException(status_code=500, detail=response.message)
-        return response
+        response = http_client.post(f"{follower_url}/replicate", json=payload)
+        return response.status_code == 200
     except Exception as e:
-        logger.error(f"Error processing write: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"Replication failed to {follower_url}: {e}")
+        return False
+
+def perform_replication(k: str, v: Optional[str], ver: int, is_del: bool) -> int:
+    """Replicate update to all followers concurrently and return acks"""
+    if not FOLLOWERS:
+        return 0
+
+    # Submit replication tasks
+    tasks = [
+        replication_executor.submit(replicate_to_follower, url, k, v, ver, is_del)
+        for url in FOLLOWERS
+    ]
+
+    acks_collected = 0
+    for future in as_completed(tasks):
+        if future.result():
+            acks_collected += 1
+            # Return early if quorum reached
+            if acks_collected >= QUORUM_SIZE:
+                return acks_collected
+
+    return acks_collected
+
+@app.get("/kv/{key}")
+def read_key(key: str):
+    """Read a key-value pair"""
+    with store_lock:
+        entry = parameters.get(key)
+
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Key does not exist")
+
+    return {
+        "key": key,
+        "value": entry["value"],
+        "version": entry["version"]
+    }
+
+@app.put("/kv/{key}")
+def write_key(key: str, request: WriteRequest):
+    """Write/update a key-value pair - Leader only"""
+    if NODE_ROLE != "leader":
+        raise HTTPException(status_code=403, detail="Write operations allowed on leader only")
+
+    val = request.value
+    global global_version
+
+    # Store locally first
+    with store_lock:
+        global_version += 1
+        current_version = global_version
+        parameters[key] = {"value": val, "version": current_version}
+
+    # Replicate to followers
+    acks_received = perform_replication(key, val, current_version, delete=False)
+
+    if acks_received >= QUORUM_SIZE:
+        return {
+            "message": "Write successful",
+            "key": key,
+            "value": val,
+            "version": current_version,
+            "acks": acks_received
+        }
+    else:
+        # In real implementation, should handle rollback, but for simplicity, fail
+        raise HTTPException(
+            status_code=500,
+            detail=f"Replication quorum not reached ({acks_received}/{QUORUM_SIZE})"
+        )
+
+@app.delete("/kv/{key}")
+def remove_key(key: str):
+    """Delete a key - Leader only"""
+    if NODE_ROLE != "leader":
+        raise HTTPException(status_code=403, detail="Delete operations allowed on leader only")
+
+    with store_lock:
+        if key not in parameters:
+            raise HTTPException(status_code=404, detail="Key does not exist")
+
+        global_version += 1
+        current_version = global_version
+        del parameters[key]
+
+    # Replicate delete
+    acks_received = perform_replication(key, None, current_version, delete=True)
+
+    if acks_received >= QUORUM_SIZE:
+        return {
+            "message": "Delete successful",
+            "key": key,
+            "version": current_version,
+            "acks": acks_received
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Replication quorum not reached ({acks_received}/{QUORUM_SIZE})"
+        )
 
 @app.post("/replicate")
-async def replicate(request: ReplicationRequest):
-    """Internal endpoint for leader to replicate writes to followers"""
-    if NODE_TYPE != 'follower':
-        raise HTTPException(status_code=403, detail="Replication endpoint only for followers")
+def handle_replication(req: ReplicationRequest):
+    """Handle replication from leader - Followers only"""
+    if NODE_ROLE != "follower":
+        raise HTTPException(status_code=403, detail="Replication endpoint for followers only")
 
-    try:
-        return await node.replicate(request.key, request.value, request.operation_id)
-    except Exception as e:
-        logger.error(f"Error processing replication: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    k, v, ver, is_del = req.key, req.value, req.version, req.delete
 
-@app.get("/health")
-async def health():
-    """Health check endpoint"""
-    return {"status": "healthy", "node_type": NODE_TYPE}
+    with store_lock:
+        existing = parameters.get(k)
 
-@app.get("/")
-async def root():
-    """Root endpoint with service information"""
+        if is_del:
+            # Only delete if no existing or version is newer
+            if existing is None or ver >= existing["version"]:
+                parameters.pop(k, None)
+        else:
+            # Update if no existing or version is newer
+            if existing is None or ver >= existing["version"]:
+                parameters[k] = {"value": v, "version": ver}
+
+    return {"status": "replicated"}
+
+@app.get("/status")
+def get_status():
+    """Health check"""
     return {
-        "service": "Distributed Key-Value Store",
-        "node_type": NODE_TYPE,
-        "endpoints": {
-            "read": "GET /read/{key}",
-            "write": "POST /write (leader only)",
-            "replicate": "POST /replicate (followers only)",
-            "health": "GET /health"
-        }
+        "node_type": NODE_ROLE,
+        "storage_size": len(parameters),
+        "quorum": QUORUM_SIZE,
+        "followers": FOLLOWERS
     }
 
 if __name__ == "__main__":
-    logger.info(f"Starting {NODE_TYPE} node")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.info(f"Starting {NODE_ROLE} node on port {PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
