@@ -103,19 +103,71 @@ All configuration is done through environment variables in `docker-compose.yml`.
 - `MIN_DELAY`: Minimum replication delay in ms (default: 0)
 - `MAX_DELAY`: Maximum replication delay in ms (default: 1000)
 
-## Testing
+## Testing and Verification
 
-### Integration Tests
+### Setup Verification
 
-Run the integration test suite to verify system correctness:
+First, verify your system has all required tools:
+
+```bash
+python3 verify_setup.py
+# or
+make check
+```
+
+This checks:
+- Docker and Docker Compose installation
+- Python packages and dependencies
+- Port availability (8000-8005)
+- Docker daemon status
+- Internet connectivity
+
+### Quick Test (under 2 minutes)
+
+Run a fast verification of basic functionality:
+
+```bash
+./quick_test.sh
+# or
+make quick
+```
+
+This script:
+- Builds and starts all services
+- Waits for health checks
+- Performs basic write/read operations via curl
+- Verifies responses and consistency
+- Cleans up automatically
+
+### Basic Test (under 2 minutes)
+
+Simple Python test with detailed output:
+
+```bash
+python3 test_basic.py
+# or
+make basic
+```
+
+Features:
+- 5-10 write operations
+- Reads from all 6 nodes
+- Clear consistency verification
+- Automatic cleanup
+
+### Full Integration Tests
+
+Comprehensive test suite:
 
 ```bash
 python3 integration_test.py
+# or
+make test
 ```
 
 Tests include:
 - Basic write operations to leader
-- Data consistency across all nodes
+- Data consistency across all nodes with detailed error reporting
 - Multiple concurrent writes
 - Authorization (writes rejected on followers)
 - Error handling scenarios
@@ -126,6 +178,8 @@ Run comprehensive performance analysis with quorum testing:
 
 ```bash
 python3 performance_analysis.py
+# or
+make perf
 ```
 
 This will:

@@ -74,31 +74,44 @@ def test_read_from_node(node_name: str, key: str) -> Optional[Dict]:
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"Read from {node_name} failed: {response.status_code} - {response.text}")
+            print(f"❌ {node_name} read failed: HTTP {response.status_code}")
+            print(f"   response: {response.text[:100]}...")
             return None
+    except requests.exceptions.Timeout:
+        print(f"❌ {node_name} read timeout after 10s")
+        return None
+    except requests.exceptions.ConnectionError:
+        print(f"❌ {node_name} connection failed - service not running")
+        return None
     except Exception as e:
-        print(f"Exception during read from {node_name}: {str(e)}")
+        print(f"❌ {node_name} read error: {str(e)}")
         return None
 
 def test_consistency(key: str, expected_value: str) -> bool:
     """Test that all nodes have the same value for a key"""
-    print(f"Testing consistency for key '{key}'...")
+    print(f"Checking data consistency for key '{key}'...")
 
     values = {}
     for node_name in SERVICES.keys():
         result = test_read_from_node(node_name, key)
         if result and result.get('found'):
             values[node_name] = result.get('value')
+        elif result and not result.get('found'):
+            values[node_name] = "NOT_FOUND"
         else:
-            values[node_name] = None
+            values[node_name] = "ERROR"
 
     # Check if all values are the same
     unique_values = set(values.values())
     if len(unique_values) == 1 and list(unique_values)[0] == expected_value:
-        print("✓ All nodes consistent")
+        print(f"✓ All nodes have correct value: '{expected_value}'")
         return True
     else:
-        print(f"✗ Inconsistent values: {values}")
+        print(f"❌ INCONSISTENT DATA for key '{key}':")
+        print(f"   Expected: '{expected_value}'")
+        for node, value in values.items():
+            status = "✓" if value == expected_value else "✗"
+            print(f"   {node}: '{value}' {status}")
         return False
 
 def test_write_rejection_with_high_quorum(key: str, value: str) -> bool:
